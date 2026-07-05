@@ -47,6 +47,7 @@ function showBanner(msg, type = 'error') {
   el.textContent = msg;
   el.className = 'admin-banner admin-banner--' + type;
   el.style.display = 'block';
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   if (type === 'success') setTimeout(() => { el.style.display = 'none'; }, 3500);
 }
 

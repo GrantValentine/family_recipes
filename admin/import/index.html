@@ -203,6 +203,34 @@ function clearFile() {
   document.getElementById('import-btn').disabled = true;
 }
 
+// ── Image compression (reduces large phone photos before upload) ──────────────
+function compressImage(file, maxDimension = 2000, quality = 0.82) {
+  return new Promise((resolve) => {
+    // Skip if already small enough
+    if (file.size <= 4 * 1024 * 1024) { resolve(file); return; }
+
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      const scale = Math.min(1, maxDimension / Math.max(width, height));
+      width  = Math.round(width  * scale);
+      height = Math.round(height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width  = width;
+      canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => resolve(new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })),
+        'image/jpeg', quality
+      );
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+    img.src = url;
+  });
+}
+
 // ── Import flow ───────────────────────────────────────────────────────────────
 async function startImport() {
   if (!selectedFile) return;
@@ -222,13 +250,16 @@ async function startImport() {
   hideBanner();
 
   try {
-    // 1. Upload file to imports bucket
-    const ext  = (selectedFile.name.split('.').pop() || 'bin').toLowerCase();
+    // 1. Upload file to imports bucket (compress images first so large phone
+    //    photos don't exceed Claude's 10 MB limit)
+    const isImage = selectedFile.type.startsWith('image/');
+    const uploadFile = isImage ? await compressImage(selectedFile) : selectedFile;
+    const ext  = (uploadFile.name.split('.').pop() || 'bin').toLowerCase();
     const path = `${Date.now()}.${ext}`;
 
     const { error: uploadErr } = await db.storage
       .from('imports')
-      .upload(path, selectedFile, { contentType: selectedFile.type, upsert: false });
+      .upload(path, uploadFile, { contentType: uploadFile.type, upsert: false });
     if (uploadErr) throw new Error('Storage upload failed: ' + uploadErr.message);
 
     // 2. Short-lived signed URL for the function to fetch the file
@@ -237,14 +268,13 @@ async function startImport() {
       .createSignedUrl(path, 120);
     if (signErr) throw new Error('Could not create signed URL: ' + signErr.message);
 
-    // 3. If it's an image, also store it in recipe-photos for potential re-use as the recipe photo
+    // 3. If it's an image, also store the compressed version in recipe-photos
     let pendingPhotoUrl = null;
-    const isImage = selectedFile.type.startsWith('image/');
     if (isImage) {
       const photoPath = `pending/${Date.now()}.${ext}`;
       const { error: photoErr } = await db.storage
         .from('recipe-photos')
-        .upload(photoPath, selectedFile, { contentType: selectedFile.type, upsert: false });
+        .upload(photoPath, uploadFile, { contentType: uploadFile.type, upsert: false });
       if (!photoErr) {
         const { data: { publicUrl } } = db.storage.from('recipe-photos').getPublicUrl(photoPath);
         pendingPhotoUrl = publicUrl;
@@ -260,7 +290,7 @@ async function startImport() {
       },
       body: JSON.stringify({
         signedUrl,
-        mimeType: selectedFile.type,
+        mimeType: uploadFile.type,
         categories: categories || [],
         tags:       tags       || [],
       }),
